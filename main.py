@@ -18,6 +18,7 @@ app.add_middleware(
 )
 
 @app.get("/")
+@app.head("/")
 def root():
     return {"status": "AI Research Agent is running"}
 
