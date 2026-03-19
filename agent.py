@@ -18,6 +18,57 @@ HEADERS = {
 }
 
 
+# ── Company Website Scraper ───────────────────────────────────────
+def scrape_company_website(topic: str) -> tuple[str, list[str]]:
+    """Try to scrape company website directly by guessing URL."""
+    results, sources = [], []
+    topic_lower = topic.lower().strip()
+
+    slug = re.sub(r"[^a-z0-9]", "", topic_lower)
+    slug_dash = re.sub(r"\s+", "-", topic_lower)
+    slug_dash = re.sub(r"[^a-z0-9-]", "", slug_dash)
+
+    candidate_urls = [
+        f"https://www.{slug}.com",
+        f"https://{slug}.com",
+        f"https://www.{slug_dash}.com",
+        f"https://{slug_dash}.com",
+        f"https://www.{slug}.io",
+        f"https://{slug}.io",
+        f"https://www.{slug}.ai",
+        f"https://{slug}.ai",
+    ]
+
+    for url in candidate_urls:
+        try:
+            resp = requests.get(url, headers=HEADERS, timeout=8)
+            if resp.status_code == 200:
+                soup = BeautifulSoup(resp.text, "html.parser")
+                for tag in soup(["script", "style", "nav", "footer", "header", "aside"]):
+                    tag.decompose()
+
+                meta = soup.find("meta", attrs={"name": "description"})
+                meta_text = meta["content"] if meta and meta.get("content") else ""
+
+                texts = [
+                    tag.get_text(separator=" ", strip=True)
+                    for tag in soup.find_all(["p", "h1", "h2", "h3", "li", "article", "section"])
+                    if len(tag.get_text(strip=True)) > 30
+                ]
+                content = re.sub(r"\s+", " ", " ".join(texts)).strip()[:4000]
+
+                if content or meta_text:
+                    full = f"Meta: {meta_text}\n{content}" if meta_text else content
+                    results.append(f"[Company Website: {url}]\n{full}")
+                    sources.append(url)
+                    print(f"[Company Scrape] Got {len(full)} chars from {url}")
+                    break
+        except Exception as e:
+            print(f"[Company Scrape] {url[:60]} → {e}")
+
+    return "\n\n---\n\n".join(results), sources
+
+
 # ── Wikipedia ─────────────────────────────────────────────────────
 def search_wikipedia(query: str) -> str:
     try:
@@ -116,14 +167,14 @@ def scrape_direct(topic: str) -> tuple[str, list[str]]:
                     tag.decompose()
                 texts = [
                     tag.get_text(separator=" ", strip=True)
-                    for tag in soup.find_all(["p", "article", "main", "h1", "h2", "h3", "td"])
-                    if len(tag.get_text(strip=True)) > 50
+                    for tag in soup.find_all(["p", "article", "main", "h1", "h2", "h3", "td", "li"])
+                    if len(tag.get_text(strip=True)) > 30
                 ]
                 content = re.sub(r"\s+", " ", " ".join(texts)).strip()[:3000]
                 if content:
                     results.append(f"[Source: {url}]\n{content}")
                     sources.append(url)
-                    print(f"[Direct Scrape] Got {len(content)} chars")
+                    print(f"[Direct Scrape] Got {len(content)} chars from {url[:60]}")
         except Exception as e:
             print(f"[Direct Scrape] {url[:60]} → {e}")
         time.sleep(0.3)
@@ -134,6 +185,12 @@ def scrape_direct(topic: str) -> tuple[str, list[str]]:
 # ── Gather All Context ────────────────────────────────────────────
 def gather_context(topic: str) -> tuple[str, list[str]]:
     context_parts, all_sources = [], []
+
+    # 0. Try company website first
+    company_text, company_sources = scrape_company_website(topic)
+    if company_text:
+        context_parts.append(company_text)
+        all_sources.extend(company_sources)
 
     # 1. Wikipedia summary
     wiki_summary = search_wikipedia(topic)
