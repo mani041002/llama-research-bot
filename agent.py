@@ -1,16 +1,17 @@
 import os
 import requests
 from bs4 import BeautifulSoup
-from groq import Groq
 import time
 import re
 from dotenv import load_dotenv
+import google.generativeai as genai
 
 load_dotenv()
 
-GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "")
-NEWSAPI_KEY  = os.environ.get("NEWSAPI_KEY", "")
-MODEL        = "llama-3.3-70b-versatile"
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
+NEWSAPI_KEY    = os.environ.get("NEWSAPI_KEY", "")
+
+genai.configure(api_key=GEMINI_API_KEY)
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36",
@@ -20,7 +21,6 @@ HEADERS = {
 
 # ── Company Website Scraper ───────────────────────────────────────
 def scrape_company_website(topic: str) -> tuple[str, list[str]]:
-    """Try to scrape company website directly by guessing URL."""
     results, sources = [], []
     topic_lower = topic.lower().strip()
 
@@ -221,46 +221,42 @@ def gather_context(topic: str) -> tuple[str, list[str]]:
     return combined[:12000], list(dict.fromkeys(all_sources))
 
 
-# ── Groq LLM Synthesis ────────────────────────────────────────────
-def synthesise_with_groq(topic: str, context: str) -> str:
-    if not GROQ_API_KEY:
-        return "Error: GROQ_API_KEY not set."
+# ── Gemini LLM Synthesis ──────────────────────────────────────────
+def synthesise_with_gemini(topic: str, context: str) -> str:
+    if not GEMINI_API_KEY:
+        return "Error: GEMINI_API_KEY not set."
 
-    client = Groq(api_key=GROQ_API_KEY)
     try:
-        response = client.chat.completions.create(
-            model=MODEL,
-            messages=[
-                {
-                    "role": "system",
-                    "content": (
-                        "You are an expert research assistant. "
-                        "Answer ONLY using the web content provided. "
-                        "Do NOT hallucinate. Extract facts, numbers, prices, dates clearly. "
-                        "Format with markdown."
-                    ),
-                },
-                {
-                    "role": "user",
-                    "content": (
-                        f"Topic: {topic}\n\n"
-                        f"--- WEB CONTEXT ---\n{context}\n--- END ---\n\n"
-                        f"Give a comprehensive factual answer about: {topic}"
-                    ),
-                },
-            ],
-            temperature=0.1,
-            max_tokens=1500,
+        model = genai.GenerativeModel(
+            model_name="gemini-1.5-flash",
+            system_instruction=(
+                "You are an expert research assistant. "
+                "Answer ONLY using the web content provided. "
+                "Do NOT hallucinate or use prior knowledge. "
+                "Extract facts, numbers, prices, dates clearly. "
+                "Format your response with markdown."
+            )
         )
-        return response.choices[0].message.content
+
+        prompt = (
+            f"Research Topic: {topic}\n\n"
+            f"--- WEB CONTEXT ---\n{context}\n--- END ---\n\n"
+            f"Give a comprehensive factual answer about: {topic}\n"
+            f"Include all relevant numbers, prices, statistics, and dates from the context."
+        )
+
+        response = model.generate_content(prompt)
+        print("[Gemini] Response received")
+        return response.text
+
     except Exception as e:
-        return f"LLM Error: {str(e)}"
+        return f"Gemini Error: {str(e)}"
 
 
 # ── Main Entry Point ──────────────────────────────────────────────
 def run_research_agent(topic: str) -> dict:
-    if not GROQ_API_KEY:
-        return {"error": "GROQ_API_KEY is not configured."}
+    if not GEMINI_API_KEY:
+        return {"error": "GEMINI_API_KEY is not configured."}
 
     context, sources = gather_context(topic)
 
@@ -272,7 +268,7 @@ def run_research_agent(topic: str) -> dict:
             "context_length": 0,
         }
 
-    answer = synthesise_with_groq(topic, context)
+    answer = synthesise_with_gemini(topic, context)
     return {
         "topic": topic,
         "answer": answer,
