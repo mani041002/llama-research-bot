@@ -6,13 +6,17 @@ import re
 from dotenv import load_dotenv
 from google import genai
 from groq import Groq
+import urllib3
+
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 load_dotenv()
 
-GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
-GROQ_API_KEY   = os.environ.get("GROQ_API_KEY", "")
-NEWSAPI_KEY    = os.environ.get("NEWSAPI_KEY", "")
-GROQ_MODEL     = "llama-3.3-70b-versatile"
+GEMINI_API_KEY   = os.environ.get("GEMINI_API_KEY", "")
+GROQ_API_KEY     = os.environ.get("GROQ_API_KEY", "")
+NEWSAPI_KEY      = os.environ.get("NEWSAPI_KEY", "")
+MAKE_WEBHOOK_URL = os.environ.get("MAKE_WEBHOOK_URL", "")
+GROQ_MODEL       = "llama-3.3-70b-versatile"
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36",
@@ -42,7 +46,7 @@ def scrape_company_website(topic: str) -> tuple[str, list[str]]:
 
     for url in candidate_urls:
         try:
-            resp = requests.get(url, headers=HEADERS, timeout=8)
+            resp = requests.get(url, headers=HEADERS, timeout=8, verify=False)
             if resp.status_code == 200:
                 soup = BeautifulSoup(resp.text, "html.parser")
                 for tag in soup(["script", "style", "nav", "footer", "header", "aside"]):
@@ -289,6 +293,26 @@ def synthesise(topic: str, context: str) -> str:
     return "Error: No AI API keys configured. Set GEMINI_API_KEY or GROQ_API_KEY."
 
 
+# ── Make.com Webhook ──────────────────────────────────────────────
+def send_to_make(topic: str, answer: str) -> None:
+    """Send research results to Make.com webhook → auto email."""
+    if not MAKE_WEBHOOK_URL:
+        print("[Make.com] No webhook URL set, skipping.")
+        return
+    try:
+        payload = {
+            "topic": topic,
+            "answer": answer,
+        }
+        resp = requests.post(MAKE_WEBHOOK_URL, json=payload, timeout=10)
+        if resp.status_code == 200:
+            print("[Make.com] ✅ Result sent successfully")
+        else:
+            print(f"[Make.com] ❌ Failed: {resp.status_code}")
+    except Exception as e:
+        print(f"[Make.com] Error: {e}")
+
+
 # ── Main Entry Point ──────────────────────────────────────────────
 def run_research_agent(topic: str) -> dict:
     if not GEMINI_API_KEY and not GROQ_API_KEY:
@@ -305,6 +329,10 @@ def run_research_agent(topic: str) -> dict:
         }
 
     answer = synthesise(topic, context)
+
+    # Send to Make.com → auto email to kumaran@tinymagiq.com
+    send_to_make(topic, answer)
+
     return {
         "topic": topic,
         "answer": answer,
