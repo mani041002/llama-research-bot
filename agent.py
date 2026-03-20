@@ -4,14 +4,15 @@ from bs4 import BeautifulSoup
 import time
 import re
 from dotenv import load_dotenv
-import google.generativeai as genai
+from google import genai
+from groq import Groq
 
 load_dotenv()
 
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
+GROQ_API_KEY   = os.environ.get("GROQ_API_KEY", "")
 NEWSAPI_KEY    = os.environ.get("NEWSAPI_KEY", "")
-
-genai.configure(api_key=GEMINI_API_KEY)
+GROQ_MODEL     = "llama-3.3-70b-versatile"
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36",
@@ -46,17 +47,14 @@ def scrape_company_website(topic: str) -> tuple[str, list[str]]:
                 soup = BeautifulSoup(resp.text, "html.parser")
                 for tag in soup(["script", "style", "nav", "footer", "header", "aside"]):
                     tag.decompose()
-
                 meta = soup.find("meta", attrs={"name": "description"})
                 meta_text = meta["content"] if meta and meta.get("content") else ""
-
                 texts = [
                     tag.get_text(separator=" ", strip=True)
                     for tag in soup.find_all(["p", "h1", "h2", "h3", "li", "article", "section"])
                     if len(tag.get_text(strip=True)) > 30
                 ]
                 content = re.sub(r"\s+", " ", " ".join(texts)).strip()[:4000]
-
                 if content or meta_text:
                     full = f"Meta: {meta_text}\n{content}" if meta_text else content
                     results.append(f"[Company Website: {url}]\n{full}")
@@ -186,31 +184,26 @@ def scrape_direct(topic: str) -> tuple[str, list[str]]:
 def gather_context(topic: str) -> tuple[str, list[str]]:
     context_parts, all_sources = [], []
 
-    # 0. Try company website first
     company_text, company_sources = scrape_company_website(topic)
     if company_text:
         context_parts.append(company_text)
         all_sources.extend(company_sources)
 
-    # 1. Wikipedia summary
     wiki_summary = search_wikipedia(topic)
     if wiki_summary:
         context_parts.append(wiki_summary)
 
-    # 2. Wikipedia search
     for item in search_wikipedia_query(topic):
         context_parts.append(
             f"[Wikipedia: {item['title']}]\nSnippet: {item['snippet']}\nURL: {item['url']}"
         )
         all_sources.append(item["url"])
 
-    # 3. NewsAPI
     news_text, news_sources = search_newsapi(topic, num_results=5)
     if news_text:
         context_parts.append(f"[Latest News]\n{news_text}")
         all_sources.extend(news_sources)
 
-    # 4. Direct scrape
     scraped_text, scraped_sources = scrape_direct(topic)
     if scraped_text:
         context_parts.append(scraped_text)
@@ -221,42 +214,85 @@ def gather_context(topic: str) -> tuple[str, list[str]]:
     return combined[:12000], list(dict.fromkeys(all_sources))
 
 
-# ── Gemini LLM Synthesis ──────────────────────────────────────────
-def synthesise_with_gemini(topic: str, context: str) -> str:
-    if not GEMINI_API_KEY:
-        return "Error: GEMINI_API_KEY not set."
-
+# ── Gemini LLM ────────────────────────────────────────────────────
+def synthesise_with_gemini(topic: str, context: str):
     try:
-        model = genai.GenerativeModel(
-            model_name="gemini-1.5-flash",
-            system_instruction=(
-                "You are an expert research assistant. "
-                "Answer ONLY using the web content provided. "
-                "Do NOT hallucinate or use prior knowledge. "
-                "Extract facts, numbers, prices, dates clearly. "
-                "Format your response with markdown."
-            )
-        )
-
+        client = genai.Client(api_key=GEMINI_API_KEY)
         prompt = (
+            f"You are an expert research assistant. "
+            f"Answer ONLY using the web content provided below. "
+            f"Do NOT hallucinate. Extract facts, numbers, prices, dates clearly. "
+            f"Format your response with markdown.\n\n"
             f"Research Topic: {topic}\n\n"
             f"--- WEB CONTEXT ---\n{context}\n--- END ---\n\n"
-            f"Give a comprehensive factual answer about: {topic}\n"
-            f"Include all relevant numbers, prices, statistics, and dates from the context."
+            f"Give a comprehensive factual answer about: {topic}"
         )
-
-        response = model.generate_content(prompt)
+        response = client.models.generate_content(
+            model="gemini-2.0-flash",
+            contents=prompt,
+        )
+        if not response or not response.text:
+            print("[Gemini] Empty response → falling back to Groq")
+            return None
         print("[Gemini] Response received")
         return response.text
-
     except Exception as e:
-        return f"Gemini Error: {str(e)}"
+        print(f"[Gemini] Failed: {e} → falling back to Groq")
+        return None
+
+
+# ── Groq LLM Fallback ─────────────────────────────────────────────
+def synthesise_with_groq(topic: str, context: str) -> str:
+    try:
+        client = Groq(api_key=GROQ_API_KEY)
+        response = client.chat.completions.create(
+            model=GROQ_MODEL,
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "You are an expert research assistant. "
+                        "Answer ONLY using the web content provided. "
+                        "Do NOT hallucinate. Extract facts, numbers, prices, dates clearly. "
+                        "Format with markdown."
+                    ),
+                },
+                {
+                    "role": "user",
+                    "content": (
+                        f"Topic: {topic}\n\n"
+                        f"--- WEB CONTEXT ---\n{context}\n--- END ---\n\n"
+                        f"Give a comprehensive factual answer about: {topic}"
+                    ),
+                },
+            ],
+            temperature=0.1,
+            max_tokens=1500,
+        )
+        print("[Groq] Response received")
+        return response.choices[0].message.content
+    except Exception as e:
+        return f"Error: Both Gemini and Groq failed. Groq error: {str(e)}"
+
+
+# ── Smart Synthesiser (Gemini → Groq fallback) ────────────────────
+def synthesise(topic: str, context: str) -> str:
+    if GEMINI_API_KEY:
+        result = synthesise_with_gemini(topic, context)
+        if result:
+            return result
+
+    if GROQ_API_KEY:
+        print("[Agent] Using Groq fallback")
+        return synthesise_with_groq(topic, context)
+
+    return "Error: No AI API keys configured. Set GEMINI_API_KEY or GROQ_API_KEY."
 
 
 # ── Main Entry Point ──────────────────────────────────────────────
 def run_research_agent(topic: str) -> dict:
-    if not GEMINI_API_KEY:
-        return {"error": "GEMINI_API_KEY is not configured."}
+    if not GEMINI_API_KEY and not GROQ_API_KEY:
+        return {"error": "No AI API key configured. Set GEMINI_API_KEY or GROQ_API_KEY."}
 
     context, sources = gather_context(topic)
 
@@ -268,7 +304,7 @@ def run_research_agent(topic: str) -> dict:
             "context_length": 0,
         }
 
-    answer = synthesise_with_gemini(topic, context)
+    answer = synthesise(topic, context)
     return {
         "topic": topic,
         "answer": answer,
